@@ -1,0 +1,124 @@
+#!/bin/bash
+# FastLLM Launcher — fnOS 生命周期入口（start / stop / status）
+# status 返回 0=运行 / 3=未运行，符合 fnOS 约定。
+# 本应用只承载官方 `ftllm launch` 网页启动器：不加载模型、不占用 GPU，也不触碰任何既有的 FastLLM 服务。
+
+APP_DIR="${TRIM_APPDEST}"
+VAR_DIR="${TRIM_PKGVAR}"
+LOG_FILE="${VAR_DIR}/info.log"
+PID_FILE="${VAR_DIR}/supervisor.pid"
+VENV_DIR="${VAR_DIR}/venv"
+WHEELS_DIR="${APP_DIR}/wheels"
+LOG_DIR="${VAR_DIR}/logs"
+
+LAUNCHER_PORT="${FTLLM_LAUNCHER_PORT:-8099}"
+SHIM_PORT="${FTLLM_SHIM_PORT:-8090}"
+export FTLLM_LAUNCHER_PORT LAUNCHER_PORT SHIM_PORT
+
+mkdir -p "${VAR_DIR}" "${LOG_DIR}" 2>/dev/null
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "${LOG_FILE}"; }
+log_err() { echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $1" >> "${LOG_FILE}"; }
+check_process() { ps -p "$1" >/dev/null 2>&1; }
+
+pid_of() {
+    [ -f "${PID_FILE}" ] || return 1
+    local pid; pid="$(head -n 1 "${PID_FILE}" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "${pid}" ] || return 1
+    echo "${pid}"
+}
+
+status() {
+    local pid; pid="$(pid_of)" || return 1
+    if check_process "${pid}"; then return 0; fi
+    rm -f "${PID_FILE}"
+    return 1
+}
+
+pick_python() {
+    for cand in /usr/bin/python3.11 /usr/bin/python3 /usr/local/bin/python3; do
+        if [ -x "${cand}" ]; then
+            if "${cand}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+                echo "${cand}"; return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+ensure_venv() {
+    if [ -x "${VENV_DIR}/bin/ftllm" ]; then
+        return 0
+    fi
+    local py; py="$(pick_python)" || { log_err "找不到 Python 3.10+ 解释器，无法创建运行环境"; return 1; }
+    log_msg "首次启动：用 ${py} 从包内 wheels 离线创建运行环境（约需 1-2 分钟）"
+    "${py}" "${APP_DIR}/ensure_venv.py" "${VENV_DIR}" "${WHEELS_DIR}" "${LOG_DIR}/ensure-venv.log" >> "${LOG_FILE}" 2>&1
+    local rc=$?
+    if [ ${rc} -ne 0 ] || [ ! -x "${VENV_DIR}/bin/ftllm" ]; then
+        log_err "运行环境创建失败（退出码 ${rc}）。详情见 ${LOG_DIR}/ensure-venv.log"
+        log_err "常见原因：系统缺少 python3-venv / ensurepip 组件，或磁盘空间不足（需要约 600MB 空闲）"
+        return 1
+    fi
+    log_msg "运行环境就绪：${VENV_DIR}"
+    return 0
+}
+
+start_app() {
+    if status; then return 0; fi
+    ensure_venv || return 1
+    log_msg "启动 supervisor（shim ${SHIM_PORT} → launcher ${LAUNCHER_PORT}，绑定 0.0.0.0）"
+    (
+        cd "${VAR_DIR}" || exit 1
+        export HOME="${VAR_DIR}"
+        export PYTHONUNBUFFERED=1
+        export TRIM_PKGVAR="${VAR_DIR}"
+        export TRIM_APPDEST="${APP_DIR}"
+        exec "${VENV_DIR}/bin/python" "${APP_DIR}/supervisor.py" >> "${LOG_DIR}/supervisor.out" 2>&1
+    ) &
+    local pid=$!
+    echo "${pid}" > "${PID_FILE}"
+    # 给 shim 一点时间起监听
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if ! check_process "${pid}"; then
+            log_err "supervisor 启动后立即退出，见 ${LOG_DIR}/supervisor.out"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+        if (echo > /dev/tcp/127.0.0.1/${SHIM_PORT}) >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    if check_process "${pid}"; then
+        log_msg "已启动 PID=${pid}（入口 http://<NAS>：${SHIM_PORT}）"
+        return 0
+    fi
+    log_err "启动失败"
+    return 1
+}
+
+stop_app() {
+    local pid; pid="$(pid_of)" || pid=""
+    log_msg "停止 FastLLM Launcher"
+    if [ -n "${pid}" ] && check_process "${pid}"; then
+        kill -TERM "${pid}" 2>/dev/null
+        local n=0
+        while check_process "${pid}" && [ ${n} -lt 10 ]; do sleep 1; n=$((n+1)); done
+        check_process "${pid}" && { log_err "10 秒未退出，强制结束"; kill -KILL "${pid}" 2>/dev/null; }
+    fi
+    # 兜底：清掉本应用自己的残留进程（只匹配本包路径，绝不误伤其它 ftllm 进程）
+    pkill -f "${APP_DIR}/supervisor.py" 2>/dev/null
+    [ -x "${VENV_DIR}/bin/ftllm" ] && pkill -f "${VENV_DIR}/bin/ftllm launch --host 0.0.0.0 --port ${LAUNCHER_PORT}" 2>/dev/null
+    rm -f "${PID_FILE}"
+    log_msg "已停止"
+    return 0
+}
+
+case "$1" in
+start)          start_app ;;
+stop)           stop_app ;;
+status)         status && exit 0 || exit 3 ;;
+restart)        stop_app; sleep 1; start_app ;;
+ensure-venv)    ensure_venv ;;
+*)              echo "用法: $0 {start|stop|status|restart|ensure-venv}" >&2; exit 1 ;;
+esac

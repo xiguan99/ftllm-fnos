@@ -1,0 +1,6 @@
+#!/bin/bash
+# 卸载后：仅在向导选择删除数据时清理运行环境与配置；用户模型文件不在此清理范围
+if [ "${wizard_data_action}" = "delete" ]; then
+    [ -n "${TRIM_PKGVAR}" ] && rm -rf "${TRIM_PKGVAR}"/venv "${TRIM_PKGVAR}"/logs 2>/dev/null
+fi
+exit 0

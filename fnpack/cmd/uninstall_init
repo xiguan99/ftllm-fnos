@@ -1,0 +1,4 @@
+#!/bin/bash
+# 卸载前：停掉本应用自己的进程（只匹配本包路径，不动其它 ftllm 进程）
+[ -n "${TRIM_APPDEST}" ] && pkill -f "${TRIM_APPDEST}/supervisor.py" 2>/dev/null || true
+exit 0

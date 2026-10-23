@@ -1,0 +1,13 @@
+appname               = ftllm
+version               = 0.1.8.2.1
+display_name          = FastLLM Launcher
+desc                  = FastLLM（ztxz16/fastllm）官方网页启动器的 fnOS 打包版：一次安装即得浏览器工作台，默认监听 0.0.0.0，局域网设备可访问。<br/>桌面图标/端口 8090 直达，每次点开自动携带本次启动的控制 token；自带 Python 运行时与离线 wheel，无需宿主机装 Python/依赖，不加载模型、不占用 GPU。<br/>镜像与页面对齐官方 ftllm launch。
+platform              = x86
+source                = thirdparty
+maintainer            = ztxz16 (upstream FastLLM)
+maintainer_url        = https://github.com/ztxz16/fastllm
+distributor           = xiguan99
+service_port          = 8090
+checkport             = true
+desktop_uidir         = ui
+desktop_applaunchname = ftllm.Application

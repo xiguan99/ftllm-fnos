@@ -1,0 +1,7 @@
+#!/bin/bash
+# 升级后：配置保留；运行环境若与包内 wheels 不匹配则重建
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] upgrade_callback：保留配置，重启服务" >> "${LOG_FILE}" 2>/dev/null
+bash "$(dirname "$0")/main" stop 2>/dev/null || true
+bash "$(dirname "$0")/main" start 2>/dev/null || true
+exit 0

@@ -1,0 +1,10 @@
+#!/bin/bash
+# 安装后回调：首启（建运行环境 → 起启动器与入口服务）
+LOG_FILE="${TRIM_PKGVAR}/info.log"
+touch "${LOG_FILE}" 2>/dev/null || true
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $1" >> "${LOG_FILE}" 2>/dev/null || true; }
+log_msg "install_callback 开始：PKGVAR=${TRIM_PKGVAR}"
+bash "$(dirname "$0")/main" start || { echo "首次启动失败，详见应用中心日志与 ${TRIM_PKGVAR}/logs/ensure-venv.log"; exit 1; }
+echo "FastLLM Launcher 已就绪：桌面图标或 http://<NAS>:8090/"
+log_msg "install_callback 完成"
+exit 0

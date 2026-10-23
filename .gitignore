@@ -1,0 +1,5 @@
+vendor/wheels/
+dist/*.fpk
+dist/*.bak-*
+fnpack/app/wheels/
+scratch/
