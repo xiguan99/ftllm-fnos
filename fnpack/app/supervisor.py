@@ -166,7 +166,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path in ("/", "/index.html"):
+        # 兼容 fnOS 网关前缀：手机端应用中心走 /app/ftllm/ 前缀进入，
+        # 只认 "/" 会 404 导致页面刷不出来。前缀请求同样 302 到 launcher。
+        if path in ("/", "/index.html") or path == "/app/ftllm" or path.startswith("/app/ftllm/"):
             info = read_token()
             if info:
                 host = self._host_only(self.headers.get("Host"))

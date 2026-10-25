@@ -82,6 +82,7 @@ pip download -d vendor/wheels uvicorn fastapi requests
 
 ## 版本
 
+- **0.1.8.2.2**：修手机端打不开——自研入口 `supervisor.py` 原先只认 `/` 与 `/index.html`，而手机端应用中心走网关前缀 `/app/ftllm/`，一律 404。现认 `/app/ftllm` 与 `/app/ftllm/*` 并同样 302 到 launcher。打包脚本新增「入口必须认 `/app/<appname>` 前缀」断言，源码与包内实物各校验一次。
 - **0.1.8.2.1**：首个构建，对应上游 `ftllm 0.1.8.2`。自带离线 wheel，首启本地建环境；入口服务自动注入随机令牌；默认对外监听。
 
 ## 许可证与致谢
