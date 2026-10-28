@@ -25,6 +25,9 @@ from pathlib import Path
 
 VAR = Path(os.environ.get("TRIM_PKGVAR") or "/tmp/ftllm-var")
 APP = Path(os.environ.get("TRIM_APPDEST") or Path(__file__).resolve().parents[1])
+# 1.9.0 起改为上游「一体包」形态：自带 Python 运行时与全部依赖，随包发布，
+# 不再在首启时用系统 python 建 venv（旧 VENV 目录保留给 0.1.8.x 升级上来的数据）
+PORTABLE = APP / "portable"
 VENV = VAR / "venv"
 LOGS = VAR / "logs"
 TOKEN_FILE = VAR / "launcher-token.json"
@@ -102,20 +105,78 @@ def stream_output(proc: subprocess.Popen) -> None:
     log(f"launcher 输出结束（退出码 {proc.poll()}）")
 
 
+def _launcher_pids() -> list[int]:
+    """返回本机所有 ftllm launcher 相关进程（按 /proc/<pid>/cmdline 精确匹配，避免 pkill -f 误伤）。"""
+    out = []
+    me = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+        joined = " ".join(argv)
+        is_ftllm_launcher = ("launch" in argv) and (
+            "ftllm.cli" in joined or any(a.endswith("/portable/ftllm") or a.endswith("/venv/bin/ftllm") for a in argv)
+        )
+        if not is_ftllm_launcher:
+            continue
+        # 只认「用本实例端口」的 launcher：同机可能有别的 ftllm 实例（生产 8099），不能误杀
+        if f"--port {LAUNCHER_PORT}" in joined or (f"--port={LAUNCHER_PORT}" in joined):
+            out.append(pid)
+    return out
+
+
+def kill_leftover_launcher() -> None:
+    """收尾兜底：清掉上个实例遗留的 launcher 进程（只认精确 cmdline，不用 pkill -f）。"""
+    pids = _launcher_pids()
+    if not pids:
+        return
+    log("清理遗留 launcher 进程: " + ", ".join(str(x) for x in pids))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(0.5)
+    for pid in _launcher_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def start_launcher() -> subprocess.Popen | None:
-    exe = VENV / "bin" / "ftllm"
+    exe = PORTABLE / "ftllm"
     if not exe.exists():
-        log(f"找不到 {exe}，先运行 ensure-venv")
-        return None
+        # 兼容：极少数情况下包内 portable 缺失，回退到旧 venv 里的 ftllm
+        alt = VENV / "bin" / "ftllm"
+        if alt.exists():
+            exe = alt
+        else:
+            log(f"找不到 {exe}，包内运行时缺失")
+            return None
     env = dict(os.environ)
     env.setdefault("HOME", str(VAR))
     env.setdefault("PYTHONUNBUFFERED", "1")
     cmd = [str(exe), "launch", "--host", "0.0.0.0", "--port", str(LAUNCHER_PORT), "--no-browser"]
+    kill_leftover_launcher()
     log("启动: " + " ".join(cmd))
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(VAR), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
+            # 单独进程组：launcher 会再 fork 出 python 子进程，只 kill 父进程会留下子进程占着端口，
+            # 导致「停止后再启动」绑不上 8099、令牌过期、页面 403。收尾时整组一起结束。
+            start_new_session=True,
         )
     except OSError as exc:
         log(f"启动失败: {exc}")
@@ -220,18 +281,26 @@ def main() -> int:
 
     def shutdown(signum, _frame):
         log(f"收到信号 {signum}，收尾退出")
-        try:
-            httpd.shutdown()
-        except Exception:
-            pass
+        # httpd.shutdown() 必须从另一个线程调用：主线程此时正阻塞在 serve_forever() 里，
+        # 在信号处理函数里直接调用会等到死锁，进程退不掉、端口一直被占（重启就会 bind 失败）。
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
         with LOCK:
             p = STATE["proc"]
         if p and p.poll() is None:
-            p.terminate()
+            # 先礼后兵，且必须打在进程组上：launcher 的 python 子进程在父进程退出后会被 init 收养，
+            # 继续占着 8099 端口，下次启动就 bind 失败。
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                p.terminate()
             try:
                 p.wait(timeout=8)
             except subprocess.TimeoutExpired:
-                p.kill()
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    p.kill()
+        kill_leftover_launcher()
         sys.exit(0)
 
     for sig in (signal.SIGTERM, signal.SIGINT):

@@ -2,13 +2,17 @@
 # FastLLM Launcher — fnOS 生命周期入口（start / stop / status）
 # status 返回 0=运行 / 3=未运行，符合 fnOS 约定。
 # 本应用只承载官方 `ftllm launch` 网页启动器：不加载模型、不占用 GPU，也不触碰任何既有的 FastLLM 服务。
+#
+# 1.9.0 起改为上游「一体包」形态：Python 运行时与全部依赖随包发布（app/portable/），
+# 不再在首启时用系统 python 建 venv，因此首次启动从「1-2 分钟」降到「几秒」。
+# 系统 python 只用来跑 supervisor.py 这个几十行的转发进程（无需第三方库）。
 
 APP_DIR="${TRIM_APPDEST}"
 VAR_DIR="${TRIM_PKGVAR}"
 LOG_FILE="${VAR_DIR}/info.log"
 PID_FILE="${VAR_DIR}/supervisor.pid"
-VENV_DIR="${VAR_DIR}/venv"
-WHEELS_DIR="${APP_DIR}/wheels"
+PORTABLE_DIR="${APP_DIR}/portable"
+FTLLM_EXE="${PORTABLE_DIR}/ftllm"
 LOG_DIR="${VAR_DIR}/logs"
 
 LAUNCHER_PORT="${FTLLM_LAUNCHER_PORT:-8099}"
@@ -38,7 +42,7 @@ status() {
 pick_python() {
     for cand in /usr/bin/python3.11 /usr/bin/python3 /usr/local/bin/python3; do
         if [ -x "${cand}" ]; then
-            if "${cand}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+            if "${cand}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,8) else 1)' 2>/dev/null; then
                 echo "${cand}"; return 0
             fi
         fi
@@ -46,34 +50,26 @@ pick_python() {
     return 1
 }
 
-ensure_venv() {
-    if [ -x "${VENV_DIR}/bin/ftllm" ]; then
+ensure_runtime() {
+    if [ -x "${FTLLM_EXE}" ]; then
         return 0
     fi
-    local py; py="$(pick_python)" || { log_err "找不到 Python 3.10+ 解释器，无法创建运行环境"; return 1; }
-    log_msg "首次启动：用 ${py} 从包内 wheels 离线创建运行环境（约需 1-2 分钟）"
-    "${py}" "${APP_DIR}/ensure_venv.py" "${VENV_DIR}" "${WHEELS_DIR}" "${LOG_DIR}/ensure-venv.log" >> "${LOG_FILE}" 2>&1
-    local rc=$?
-    if [ ${rc} -ne 0 ] || [ ! -x "${VENV_DIR}/bin/ftllm" ]; then
-        log_err "运行环境创建失败（退出码 ${rc}）。详情见 ${LOG_DIR}/ensure-venv.log"
-        log_err "常见原因：系统缺少 python3-venv / ensurepip 组件，或磁盘空间不足（需要约 600MB 空闲）"
-        return 1
-    fi
-    log_msg "运行环境就绪：${VENV_DIR}"
-    return 0
+    log_err "包内运行时缺失：${FTLLM_EXE}（重装应用，或检查安装目录是否被清理）"
+    return 1
 }
 
 start_app() {
     if status; then return 0; fi
-    ensure_venv || return 1
-    log_msg "启动 supervisor（shim ${SHIM_PORT} → launcher ${LAUNCHER_PORT}，绑定 0.0.0.0）"
+    ensure_runtime || return 1
+    local py; py="$(pick_python)" || { log_err "找不到 Python 3.8+ 解释器（supervisor 需要它做端口转发）"; return 1; }
+    log_msg "启动 supervisor（${py}；shim ${SHIM_PORT} → launcher ${LAUNCHER_PORT}，绑定 0.0.0.0）"
     (
         cd "${VAR_DIR}" || exit 1
         export HOME="${VAR_DIR}"
         export PYTHONUNBUFFERED=1
         export TRIM_PKGVAR="${VAR_DIR}"
         export TRIM_APPDEST="${APP_DIR}"
-        exec "${VENV_DIR}/bin/python" "${APP_DIR}/supervisor.py" >> "${LOG_DIR}/supervisor.out" 2>&1
+        exec "${py}" "${APP_DIR}/supervisor.py" >> "${LOG_DIR}/supervisor.out" 2>&1
     ) &
     local pid=$!
     echo "${pid}" > "${PID_FILE}"
@@ -108,7 +104,7 @@ stop_app() {
     fi
     # 兜底：清掉本应用自己的残留进程（只匹配本包路径，绝不误伤其它 ftllm 进程）
     pkill -f "${APP_DIR}/supervisor.py" 2>/dev/null
-    [ -x "${VENV_DIR}/bin/ftllm" ] && pkill -f "${VENV_DIR}/bin/ftllm launch --host 0.0.0.0 --port ${LAUNCHER_PORT}" 2>/dev/null
+    pkill -f "${FTLLM_EXE} launch --host 0.0.0.0 --port ${LAUNCHER_PORT}" 2>/dev/null
     rm -f "${PID_FILE}"
     log_msg "已停止"
     return 0
@@ -119,6 +115,6 @@ start)          start_app ;;
 stop)           stop_app ;;
 status)         status && exit 0 || exit 3 ;;
 restart)        stop_app; sleep 1; start_app ;;
-ensure-venv)    ensure_venv ;;
-*)              echo "用法: $0 {start|stop|status|restart|ensure-venv}" >&2; exit 1 ;;
+ensure-runtime) ensure_runtime ;;
+*)              echo "用法: $0 {start|stop|status|restart|ensure-runtime}" >&2; exit 1 ;;
 esac

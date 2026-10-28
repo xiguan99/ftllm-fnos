@@ -1,5 +1,8 @@
-vendor/wheels/
-dist/*.fpk
+backups/
+dist/
 dist/*.bak-*
+dist/*.fpk
+fnpack/app/portable/
 fnpack/app/wheels/
 scratch/
+vendor/wheels/
