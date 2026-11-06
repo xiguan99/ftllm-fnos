@@ -53,6 +53,9 @@ FastLLM 是一个纯 C++ 实现的大模型推理库；它的 `launch` 子命令
 **提示运行时缺失**
 说明安装目录里的 `portable/` 被清理或安装中断，重新安装应用即可（无需装任何系统依赖）。
 
+**选了 CUDA 却实际跑在 CPU 上**
+1.9.0.1 及更早版本有这个问题：包内 CUDA 核心库依赖 `libnccl.so.2`，而上游一体包只把它放在 `site-packages/nvidia/nccl/lib`（不在库加载路径里），打包时该目录又被当作冗余裁掉，于是 CUDA 库加载失败、静默退回 CPU 版，界面上没有任何提示。1.9.0.2 起把 `libnccl.so.2` 与 `libnccl_device.bc` 放进 `portable/support/runtime/lib`（加载路径第一项），并给「降级到 CPU」加了一行明确告警。判断方法：启动日志里出现 `Load libfastllm_tools.so` 才是 CUDA，出现 `Load libfastllm_tools-cpu.so` 就是 CPU（并在 `nvidia-smi` 里看不到显存占用）。设备号注意：面板里的 `cuda:N` 是 CUDA 序号，与 `nvidia-smi` 的序号可能不同，选卡前先看启动器「硬件」页的对应关系。
+
 **页面能打开但点按钮没反应 / 提示无权限**
 说明你是直接访问了启动器端口（8099）而没有令牌。改从桌面图标或 8090 进入。
 
@@ -79,12 +82,16 @@ tar xzf FastLLM-Launcher-1.9.0-linux-x86_64-portable.tar.gz -C /tmp
 bash scripts/prep-portable.sh /tmp/FastLLM-Launcher-1.9.0-linux-x86_64-portable
 # 4) 出包
 bash scripts/build.sh
+
+上游一体包里的 NCCL 运行库会在铺包时自动落到 `portable/support/runtime/lib`；若某个上游版本自己不带，
+把 `libnccl.so.2` 与 `libnccl_device.bc` 放到 `vendor/nccl/lib/` 即可（`pip download nvidia-nccl-cu12 --no-deps` 解包可得），构建会断言包内就位。
 ```
 
 产物在 `dist/ftllm_v<版本>_x86.fpk`。构建脚本会断言：包内 `portable/ftllm` 版本为 1.9.0、不含 Electron 桌面端、不含旧 `wheels/`、图标权限 644、入口认 `/app/ftllm` 前缀。
 
 ## 版本
 
+- **1.9.0.2**：修「面板选 cuda、实际全程跑 CPU」。根因是包内缺 NCCL——CUDA 核心库 `libfastllm_tools.so` 依赖 `libnccl.so.2`，加载失败后 `ftllm/llm.py` 静默降级到 `libfastllm_tools-cpu.so`，界面上毫无提示。现在 NCCL 2.32.3 的 `libnccl.so.2` 与 `libnccl_device.bc` 随包落在运行时加载路径里，构建脚本断言其存在，静默降级也改为打印告警。实测 `Qwen3-0.6B` 生成 200 token ≈142 tok/s（CPU 模式光 warmup 就要十分钟以上）。
 - **1.9.0.1**：跟进上游 1.9.0「一体包」形态。运行时（CPython 3.11 + 全部依赖 + CUDA 运行库）随包发布，装机即用，首启从 1–2 分钟降到几秒，不再需要系统 Python 建虚拟环境。按 fnOS 场景砍掉 Electron 桌面端（GUI），只保留命令行 `ftllm` 与网页启动器；启动器仍是 `ftllm launch`，入口与令牌机制不变。版本号改为跟随上游（`1.9.0.1` = 上游 1.9.0 + 打包号 1）。
 - **0.1.8.2.2**：修手机端打不开——自研入口 `supervisor.py` 原先只认 `/` 与 `/index.html`，而手机端应用中心走网关前缀 `/app/ftllm/`，一律 404。现认 `/app/ftllm` 与 `/app/ftllm/*` 并同样 302 到 launcher。打包脚本新增「入口必须认 `/app/<appname>` 前缀」断言，源码与包内实物各校验一次。
 - **0.1.8.2.1**：首个构建，对应上游 `ftllm 0.1.8.2`。自带离线 wheel，首启本地建环境；入口服务自动注入随机令牌；默认对外监听。

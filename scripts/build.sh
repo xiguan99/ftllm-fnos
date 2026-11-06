@@ -114,6 +114,11 @@ if ! grep -qx "portable/ftllm" "$LIST"; then
   echo "✗ 包内缺少 portable/ftllm（运行时没进包）"; rm -f "$LIST"; exit 1
 fi
 echo "  ✓ 包内 portable/ftllm 已随包发布（$(grep -c "^portable/" "$LIST") 个运行时条目）"
+# 修复断言：libnccl.so.2 必须落在 LD_LIBRARY_PATH 内的 runtime/lib（否则 CUDA 核心库静默降级 CPU）
+if ! grep -qx "portable/support/runtime/lib/libnccl.so.2" "$LIST"; then
+  echo "✗ 包内缺 portable/support/runtime/lib/libnccl.so.2 —— 面板选 cuda 会静默跑 CPU"; rm -f "$LIST"; exit 1
+fi
+echo "  ✓ 包内 libnccl.so.2 就位"
 if grep -q "^wheels/" "$LIST"; then
   echo "✗ 包内仍有 wheels/（1.9.0 起不再用离线 wheel 建 venv）"; rm -f "$LIST"; exit 1
 fi

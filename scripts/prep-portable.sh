@@ -40,6 +40,19 @@ done
 
 # ── 3) 瘦身：可缺省的大件 ──
 SP="$DST/support/runtime/lib/python3.11/site-packages"
+# NCCL 必须先救出来再删：上游只把 libnccl.so.2 放在 site-packages/nvidia/nccl/lib，
+# 而该目录不在 LD_LIBRARY_PATH 里 —— 包内 CUDA 核心库会因缺 libnccl.so.2 加载失败，
+# 再被 llm.py 静默降级成 CPU 版（2026-11-06 实际事故：面板选 cuda 却全程跑 CPU）。
+# 修法：删目录前把 libnccl.so.2 / libnccl_device.bc 落到 support/runtime/lib（LD_LIBRARY_PATH 第一项）。
+NCCL_DST="$DST/support/runtime/lib"
+for f in libnccl.so.2 libnccl_device.bc; do
+  for cand in "$SP/nvidia/nccl/lib/$f" "$ROOT/vendor/nccl/lib/$f"; do
+    if [ -e "$cand" ]; then cp -a "$cand" "$NCCL_DST/$f"; break; fi
+  done
+done
+if [ ! -e "$NCCL_DST/libnccl.so.2" ]; then
+  echo "✗ 缺 libnccl.so.2（包内 nvidia/nccl 与 vendor/nccl/lib 都没有）—— CUDA 会静默退回 CPU"; exit 1
+fi
 rm -rf "$SP/triton" "$SP"/triton-*.dist-info 2>/dev/null || true
 rm -rf "$SP/nvidia/nccl" "$SP"/nvidia_nccl_*.dist-info 2>/dev/null || true
 # CPython 自带、命令行运行时用不到的部分

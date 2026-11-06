@@ -6,3 +6,4 @@ fnpack/app/portable/
 fnpack/app/wheels/
 scratch/
 vendor/wheels/
+vendor/nccl/
