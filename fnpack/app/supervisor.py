@@ -159,6 +159,61 @@ def kill_leftover_launcher() -> None:
             pass
 
 
+def _server_pids() -> list[int]:
+    """返回本机孤儿 ftllm 推理服务进程（`python -m ftllm.cli server`，且已被 init 收养）。
+
+    launcher 起的 server 是它的子进程；应用重启只杀掉 launcher 的进程组，
+    server 会被 init 收养（ppid=1）并长期占用 8080/8081，下次启动报端口被占。
+    只看 ppid==1，避免误杀正在由存活 launcher 管着的服务。
+    """
+    out = []
+    me = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+        joined = " ".join(argv)
+        if "ftllm.cli" not in joined or "server" not in argv:
+            continue
+        try:
+            with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as f:
+                ppid = int(f.read().split(") ", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        if ppid == 1:
+            out.append(pid)
+    return out
+
+
+def kill_orphan_servers() -> None:
+    """收尾兜底：清掉被 init 收养的推理服务进程，释放 8080/8081。"""
+    pids = _server_pids()
+    if not pids:
+        return
+    log("清理孤儿推理服务进程: " + ", ".join(str(x) for x in pids))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    time.sleep(1.0)
+    for pid in _server_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def start_launcher() -> subprocess.Popen | None:
     exe = PORTABLE / "ftllm"
     if not exe.exists():
@@ -174,6 +229,7 @@ def start_launcher() -> subprocess.Popen | None:
     env.setdefault("PYTHONUNBUFFERED", "1")
     cmd = [str(exe), "launch", "--host", "0.0.0.0", "--port", str(LAUNCHER_PORT), "--no-browser"]
     kill_leftover_launcher()
+    kill_orphan_servers()
     log("启动: " + " ".join(cmd))
     try:
         proc = subprocess.Popen(
@@ -323,42 +379,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         ctype = resp.getheader("Content-Type") or "application/octet-stream"
-        extra = {}
+        extra = []
         for k in ("Cache-Control", "ETag", "Last-Modified", "Content-Disposition",
                   "Location", "Content-Range", "Accept-Ranges"):
             v = resp.getheader(k)
             if v:
-                extra[k] = v
+                extra.append((k, v))
         csp = resp.getheader("Content-Security-Policy")
         if csp:
             # 上游写死 frame-ancestors 'none'，这里放开到 *（其余策略原样保留），
             # 这样面板既能顶层打开，也能被 fnOS 页面 iframe 嵌入。
-            extra["Content-Security-Policy"] = re.sub(r"frame-ancestors[^;]*", "frame-ancestors *", csp)
+            extra.append(("Content-Security-Policy", re.sub(r"frame-ancestors[^;]*", "frame-ancestors *", csp)))
+        # 必须逐条转发 Set-Cookie：launcher 用 POST /api/webui/open 下发 webui 会话 cookie，
+        # 丢了它 /webui/<session>/ 就 403 "Open WebUI from the Launcher."，工作室只剩占位页。
+        for v in resp.headers.get_all("Set-Cookie") or []:
+            extra.append(("Set-Cookie", v))
+
+        # 304/204 与 HEAD 不允许有消息体：之前无条件写 Transfer-Encoding: chunked，
+        # 浏览器收到带 chunked 的 304 会直接 net::ERR_INVALID_HTTP_RESPONSE（静态插件脚本全挂、
+        # 面板启动项目列表变空），必须走纯头部分支。
+        no_body = method == "HEAD" or resp.status in (204, 304, 205)
 
         try:
             self.send_response(resp.status)
-            if "text/html" in ctype:
+            if "text/html" in ctype and not no_body:
                 text = resp.read().decode("utf-8", "replace")
                 tag = '<script src="/__token.js"></script>'
                 text = text.replace("</head>", tag + "</head>", 1) if "</head>" in text else tag + text
                 data = text.encode("utf-8")
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
-                for k, v in extra.items():
+                for k, v in extra:
                     self.send_header(k, v)
                 self.end_headers()
                 if method != "HEAD":
                     self.wfile.write(data)
             else:
-                self.send_header("Content-Type", ctype)
-                if method == "HEAD":
-                    self.send_header("Content-Length", "0")
+                if no_body:
+                    if method == "HEAD":
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", "0")
+                    # 204/304 连 Content-Length 都不能带，否则浏览器判为非法响应
                 else:
+                    self.send_header("Content-Type", ctype)
                     self.send_header("Transfer-Encoding", "chunked")
-                for k, v in extra.items():
+                for k, v in extra:
                     self.send_header(k, v)
                 self.end_headers()
-                if method != "HEAD":
+                if not no_body:
                     while True:
                         chunk = resp.read(262144)
                         if not chunk:
@@ -409,6 +477,7 @@ def main() -> int:
                 except (ProcessLookupError, PermissionError):
                     p.kill()
         kill_leftover_launcher()
+        kill_orphan_servers()
         sys.exit(0)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
