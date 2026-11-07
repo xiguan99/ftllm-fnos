@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 VAR = Path(os.environ.get("TRIM_PKGVAR") or "/tmp/ftllm-var")
@@ -365,6 +366,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers["x-ftllm-launcher-token"] = token
         # 关掉上游压缩：HTML 需要解压后才能插入 /__token.js
         headers["Accept-Encoding"] = "identity"
+        # launcher 会校验 /webui 下非 GET 请求的 Origin 必须等于它自己的 base_url；
+        # 浏览器从局域网访问时 Origin 是 http://<NAS>:8090，原样转发必然 403 "Invalid request origin."
+        # （新建对话、发消息都走这条，所以必须改写成本进程到上游的地址）。
+        upstream_base = f"http://127.0.0.1:{LAUNCHER_PORT}"
+        if self.headers.get("Origin"):
+            headers["Origin"] = upstream_base
+        referer = self.headers.get("Referer")
+        if referer:
+            headers["Referer"] = upstream_base + (urllib.parse.urlsplit(referer).path or "/")
 
         conn = http.client.HTTPConnection("127.0.0.1", LAUNCHER_PORT, timeout=600)
         # 上游 launcher 不实现 HEAD（直接 405），HEAD 探测统一用 GET 取头部再丢 body
