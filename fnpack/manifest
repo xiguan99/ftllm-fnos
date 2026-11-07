@@ -1,7 +1,7 @@
 appname               = ftllm
-version               = 1.9.0.2
+version               = 1.9.1
 display_name          = FastLLM Launcher
-desc                  = FastLLM（ztxz16/fastllm）1.9.0 官方网页启动器的 fnOS 打包版：一次安装即得浏览器工作台，默认监听 0.0.0.0，局域网设备可访问。<br/>桌面图标/端口 8090 直达，每次点开自动携带本次启动的控制 token。<br/>采用上游 1.9.0「一体包」运行时：Python 与全部依赖随包发布，装机即用，首启不联网、不编译、不建 venv；不加载模型、不占用 GPU，也不影响已有的 FastLLM 服务。
+desc                  = FastLLM（ztxz16/fastllm）1.9.1 官方网页启动器的 fnOS 打包版：一次安装即得浏览器工作台，默认监听 0.0.0.0，局域网设备可访问。<br/>桌面图标/端口 8090 直达面板——内置反向代理注入控制 token，打开即用，不再跳转、不再手抄 token，也可直接嵌入 iframe。<br/>采用上游 1.9.1「一体包」运行时：Python、CUDA 与媒体依赖（含 NCCL、ffmpeg）随包发布，装机即用，首启不联网、不编译、不建 venv；新增视频后端与多模型管理，不预加载模型、不占用 GPU，也不影响已有的 FastLLM 服务。
 platform              = x86
 source                = thirdparty
 maintainer            = ztxz16 (upstream FastLLM)

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ftllm-fnos 构建脚本
-# 流程: 包内运行时（上游 1.9.0 一体包）→ 图标 → 入口前缀断言 → 隐私扫描 → fnpack 出 .fpk
+# 流程: 包内运行时（上游 1.9.1 一体包）→ 图标 → 入口前缀断言 → 隐私扫描 → fnpack 出 .fpk
 #
 # 1.8.x 及更早：包里只放 wheels（约 200MB），首启用系统 python 建 venv；
 # 1.9.0 起上游改发「一体包」，自带 Python 运行时与全部依赖。
@@ -28,8 +28,8 @@ fi
 PV="$("$PORTABLE/ftllm" --version 2>&1 | tail -1)"
 echo "  运行时 $PV / $(du -sh "$PORTABLE" | cut -f1)"
 case "$PV" in
-  *"ftllm version: 1.9.0"*) ;;
-  *) echo "✗ 包内 ftllm 版本不是 1.9.0：$PV"; exit 1 ;;
+  *"ftllm version: 1.9.1"*) ;;
+  *) echo "✗ 包内 ftllm 版本不是 1.9.1：$PV"; exit 1 ;;
 esac
 # Electron 桌面端（GUI）不进包：fnOS 只走网页启动器，省 300MB+
 if [ -e "$PORTABLE/Fastllm-Launcher" ] || [ -e "$PORTABLE/support/FastLLM-Launcher.bin" ]; then
@@ -119,6 +119,11 @@ if ! grep -qx "portable/support/runtime/lib/libnccl.so.2" "$LIST"; then
   echo "✗ 包内缺 portable/support/runtime/lib/libnccl.so.2 —— 面板选 cuda 会静默跑 CPU"; rm -f "$LIST"; exit 1
 fi
 echo "  ✓ 包内 libnccl.so.2 就位"
+# 1.9.1 起启动器依赖 media 里的 ffmpeg/ffprobe（视频与多模态）
+if ! grep -qx "portable/support/media/bin/ffmpeg" "$LIST"; then
+  echo "✗ 包内缺 portable/support/media/bin/ffmpeg —— 视频/多模态会失效"; rm -f "$LIST"; exit 1
+fi
+echo "  ✓ 包内 media/ffmpeg 就位"
 if grep -q "^wheels/" "$LIST"; then
   echo "✗ 包内仍有 wheels/（1.9.0 起不再用离线 wheel 建 venv）"; rm -f "$LIST"; exit 1
 fi

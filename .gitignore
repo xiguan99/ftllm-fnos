@@ -7,3 +7,4 @@ fnpack/app/wheels/
 scratch/
 vendor/wheels/
 vendor/nccl/
+dl-*/

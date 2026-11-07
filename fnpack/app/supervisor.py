@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""FastLLM Launcher 入口 shim。
+"""FastLLM Launcher 入口 shim（8090 反向代理）。
 
-桌面图标/端口（service_port 8090）指向本服务：每次被访问时读取当前 launcher 的
-控制 token，再 302 到 `http://<同主机>:<launcher 端口>/?token=<token>`。
-token 是每次启动随机生成的，所以图标 URL 保持静态、由这里在访问瞬间注入。
+桌面图标/端口（service_port 8090）指向本服务，本服务把请求反向代理到内部 launcher
+（默认 8099）：
+  - 面板与 API 同 origin，地址栏里没有 token，也不再 302 跳转到另一个端口；
+  - 上游只认请求头 `x-ftllm-launcher-token`，由本进程在转发时注入，浏览器看不到；
+  - HTML 里插一行 `/__token.js`，把 token 写进 sessionStorage，让 SPA 用自己的逻辑
+    拿到它（spa 读取顺序：query > sessionStorage）。
+token 每次启动随机生成，所以图标 URL 保持静态、由这里在转发瞬间注入。
 
 同时是 launcher 子进程的监督者：拉起 `ftllm launch --host 0.0.0.0`，把 stdout 写日志
 并实时解析 token 写入 launcher-token.json（0600）。
@@ -11,6 +15,7 @@ token 是每次启动随机生成的，所以图标 URL 保持静态、由这里
 
 from __future__ import annotations
 
+import http.client
 import http.server
 import json
 import os
@@ -202,7 +207,14 @@ margin:1.2rem auto;animation:r 1s linear infinite}@keyframes r{to{transform:rota
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "ftllm-shim/1.0"
+    server_version = "ftllm-shim/2.0"
+    protocol_version = "HTTP/1.1"
+    # 转发时丢弃的头：逐跳头 + 由本进程重新决定的头（host 改写、token 注入、压缩关闭）
+    DROP_HEADERS = {
+        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
+        "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+        "accept-encoding", "x-ftllm-launcher-token",
+    }
 
     def log_message(self, fmt: str, *args) -> None:  # 静音默认访问日志
         pass
@@ -226,19 +238,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._dispatch("HEAD")
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._dispatch("POST")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._dispatch("PATCH")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
+    def _dispatch(self, method: str) -> None:
         path = self.path.split("?", 1)[0]
-        # 兼容 fnOS 网关前缀：手机端应用中心走 /app/ftllm/ 前缀进入，
-        # 只认 "/" 会 404 导致页面刷不出来。前缀请求同样 302 到 launcher。
-        if path in ("/", "/index.html") or path == "/app/ftllm" or path.startswith("/app/ftllm/"):
+        # 手机端应用中心走 /app/ftllm/ 前缀进入；SPA 全用绝对路径（/assets、/api），
+        # 带前缀会整页 404，所以这里只做「去掉前缀」的一跳（不再携带 token）。
+        if path == "/app/ftllm" or path.startswith("/app/ftllm/"):
+            host = self._host_only(self.headers.get("Host"))
+            self._send(302, b"", "text/plain; charset=utf-8", {"Location": f"http://{host}:{SHIM_PORT}/"})
+            return
+        # 注入用脚本：同 origin，符合上游 CSP 的 script-src 'self'
+        if path == "/__token.js":
             info = read_token()
-            if info:
-                host = self._host_only(self.headers.get("Host"))
-                target = f"http://{host}:{LAUNCHER_PORT}/?token={info['token']}"
-                self.log_message("302 -> launcher")
-                self._send(302, b"", "text/plain; charset=utf-8", {"Location": target})
-                return
-            page = PENDING_PAGE.replace("%LOG%", str(LAUNCHER_LOG))
-            self._send(503, page.encode("utf-8"), "text/html; charset=utf-8", {"Refresh": "3"})
+            tok = (info or {}).get("token") or ""
+            body = ("(function(){try{sessionStorage.setItem('ftllm-launcher-token',%s);}"
+                    "catch(e){}})();" % json.dumps(tok)).encode("utf-8")
+            self._send(200, body, "application/javascript; charset=utf-8")
             return
         if path == "/healthz":
             with LOCK:
@@ -261,7 +292,84 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             self._send(200, json.dumps(info).encode(), "application/json")
             return
-        self._send(404, b'{"error":"not found"}', "application/json")
+        info = read_token()
+        if not info:
+            page = PENDING_PAGE.replace("%LOG%", str(LAUNCHER_LOG))
+            self._send(503, page.encode("utf-8"), "text/html; charset=utf-8", {"Refresh": "3"})
+            return
+        self._proxy(method, info["token"])
+
+    def _proxy(self, method: str, token: str) -> None:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        body = self.rfile.read(n) if n else b""
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in self.DROP_HEADERS}
+        headers["x-ftllm-launcher-token"] = token
+        # 关掉上游压缩：HTML 需要解压后才能插入 /__token.js
+        headers["Accept-Encoding"] = "identity"
+
+        conn = http.client.HTTPConnection("127.0.0.1", LAUNCHER_PORT, timeout=600)
+        # 上游 launcher 不实现 HEAD（直接 405），HEAD 探测统一用 GET 取头部再丢 body
+        upstream_method = "GET" if method == "HEAD" else method
+        try:
+            conn.request(upstream_method, self.path, body=body or None, headers=headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            log(f"代理失败 {method} {self.path}: {exc}")
+            page = PENDING_PAGE.replace("%LOG%", str(LAUNCHER_LOG))
+            self._send(502, page.encode("utf-8"), "text/html; charset=utf-8", {"Refresh": "3"})
+            return
+
+        ctype = resp.getheader("Content-Type") or "application/octet-stream"
+        extra = {}
+        for k in ("Cache-Control", "ETag", "Last-Modified", "Content-Disposition",
+                  "Location", "Content-Range", "Accept-Ranges"):
+            v = resp.getheader(k)
+            if v:
+                extra[k] = v
+        csp = resp.getheader("Content-Security-Policy")
+        if csp:
+            # 上游写死 frame-ancestors 'none'，这里放开到 *（其余策略原样保留），
+            # 这样面板既能顶层打开，也能被 fnOS 页面 iframe 嵌入。
+            extra["Content-Security-Policy"] = re.sub(r"frame-ancestors[^;]*", "frame-ancestors *", csp)
+
+        try:
+            self.send_response(resp.status)
+            if "text/html" in ctype:
+                text = resp.read().decode("utf-8", "replace")
+                tag = '<script src="/__token.js"></script>'
+                text = text.replace("</head>", tag + "</head>", 1) if "</head>" in text else tag + text
+                data = text.encode("utf-8")
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in extra.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if method != "HEAD":
+                    self.wfile.write(data)
+            else:
+                self.send_header("Content-Type", ctype)
+                if method == "HEAD":
+                    self.send_header("Content-Length", "0")
+                else:
+                    self.send_header("Transfer-Encoding", "chunked")
+                for k, v in extra.items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if method != "HEAD":
+                    while True:
+                        chunk = resp.read(262144)
+                        if not chunk:
+                            break
+                        self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            conn.close()
 
 
 class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):

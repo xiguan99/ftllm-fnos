@@ -1,14 +1,16 @@
 #!/bin/bash
-# 从上游 1.9.0「一体包」铺出包内运行时目录 fnpack/app/portable/
+# 从上游 1.9.1「一体包」铺出包内运行时目录 fnpack/app/portable/
 #
 # 用法: bash scripts/prep-portable.sh <解包后的一体包根目录>
-#       例: bash scripts/prep-portable.sh /vol3/1000/hhd/ff190/FastLLM-Launcher-1.9.0-linux-x86_64-portable
+#       例: bash scripts/prep-portable.sh dl-1.9.1/x/FastLLM-Launcher-1.9.1-linux-x86_64-portable
 #
 # 保留：命令行 ftllm 与其完整 Python 运行时（含 CUDA 运行库）、网页启动器所需文件
 # 丢弃：Electron 桌面端（GUI）—— fnOS 只走网页入口，这部分约 300MB（FastLLM-Launcher.bin、
 #       lib/locales/*.pak/chrome_*/resources/desktop 等），没有任何调用方
 # 瘦身：site-packages 里的 triton（894MB，ftllm 只做 import 探测，缺失自动降级）与
 #       nvidia/nccl（384MB，单卡推理不用），以及 __pycache__、CPython 自带的 test/ensurepip 等
+# 保留 media（199MB）：1.9.1 起启动器把 support/media/{bin,lib} 塞进 PATH/LD_LIBRARY_PATH，
+#       ffmpeg/ffprobe 与 libav* 在那里，视频与多模态链依赖它，不能省。
 set -euo pipefail
 
 SRC="${1:-}"
@@ -31,7 +33,7 @@ done
 
 # ── 2) support 下运行所需部分（白名单，避免把 Electron 一起搬进来）──
 KEEP="entrypoint.sh env.sh ftllm ftllm-agent-runtime ftllm-check pip python terminal.sh launch.sh
-      libexec docs licenses third-party runtime BUILD-INFO.json LICENSE README.md THIRD-PARTY-NOTICES.md
+      libexec docs licenses third-party runtime media BUILD-INFO.json LICENSE README.md THIRD-PARTY-NOTICES.md
       build-constraints.txt requirements.lock.txt version ELF-GLIBC-REQUIREMENTS.txt
       snapshot_blob.bin v8_context_snapshot.bin vk_swiftshader_icd.json"
 for f in $KEEP; do
@@ -73,8 +75,12 @@ if [ ! -x "$DST/ftllm" ]; then echo "✗ 缺 $DST/ftllm"; chmod +x "$DST/ftllm" 
 VER="$("$DST/ftllm" --version 2>&1 | tail -1)"
 echo "  运行时: $VER"
 case "$VER" in
-  *"ftllm version: 1.9.0"*) ;;
-  *) echo "✗ 版本不是 1.9.0"; exit 1 ;;
+  *"ftllm version: 1.9.1"*) ;;
+  *) echo "✗ 版本不是 1.9.1：$VER"; exit 1 ;;
 esac
+# media 必须进包：启动器把 support/media/{bin,lib} 加进 PATH/LD_LIBRARY_PATH
+if [ ! -x "$DST/support/media/bin/ffmpeg" ]; then
+  echo "✗ 缺 support/media/bin/ffmpeg —— 视频与多模态功能会失效"; exit 1
+fi
 echo "  体积: $(du -sh "$DST" | cut -f1)"
 echo "═══ 完成 ═══"
