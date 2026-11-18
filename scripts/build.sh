@@ -35,6 +35,12 @@ if [ -e "$PORTABLE/Fastllm-Launcher" ] || [ -e "$PORTABLE/support/FastLLM-Launch
   echo "✗ 包内仍含 Electron 桌面端，请重跑 prep-portable.sh 裁剪"; exit 1
 fi
 
+# ── 1.5) 本地补丁（幂等）：静态资源缓存头 + studio 绑定判空 ──
+# 根因：上游静态挂载无 Cache-Control，覆盖升级后浏览器启发式缓存新旧混搭，
+# studio 绑定链取 #fileInput 为 null 抛 TypeError，整个工作室打挂。详见 scripts/apply-patches.sh 头注释。
+echo "[1.5/5] 应用本地补丁 ..."
+bash "$ROOT/scripts/apply-patches.sh"
+
 # ── 2) 图标（官方源图 assets/ftllm-icon.png → 256/64）──
 echo "[2/5] 生成图标 ..."
 SRC_ICON="$ROOT/assets/ftllm-icon.png"
@@ -128,5 +134,16 @@ if grep -q "^wheels/" "$LIST"; then
 fi
 rm -f "$LIST"
 echo "  ✓ 包内无 wheels/ 残留"
+# 补丁落包断言：静态资源缓存头（1.9.2.1）与 studio 绑定判空必须在包内运行时里，
+# 防止 prep 重铺未打补丁 / fnpack 打进旧文件。
+PKG="$ROOT/dist/ftllm_v${VERSION}_x86.fpk"
+SP="portable/support/runtime/lib/python3.11/site-packages/ftllm"
+CHK="$(mktemp)"
+tar -xzOf "$PKG" app.tgz | tar -xzOf - "$SP/launcher.py" > "$CHK" 2>/dev/null || true
+grep -qF '("/api/", "/assets/", "/ui_plugins/")' "$CHK" || { echo "✗ 包内 launcher.py 缺缓存头补丁"; rm -f "$CHK"; exit 1; }
+tar -xzOf "$PKG" app.tgz | tar -xzOf - "$SP/ui_plugins/studio/app.js" > "$CHK" 2>/dev/null || true
+grep -qF 'if (el) el[key] = val;' "$CHK" || { echo "✗ 包内 studio/app.js 缺绑定判空补丁"; rm -f "$CHK"; exit 1; }
+rm -f "$CHK"
+echo "  ✓ 包内补丁就位（缓存头 + studio 判空）"
 ls -lh "$ROOT/dist/" | tail -3
 echo "═══ 完成 ═══"

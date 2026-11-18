@@ -87,10 +87,13 @@ bash scripts/build.sh
 把 `libnccl.so.2` 与 `libnccl_device.bc` 放到 `vendor/nccl/lib/` 即可（`pip download nvidia-nccl-cu12 --no-deps` 解包可得），构建会断言包内就位。
 ```
 
-产物在 `dist/ftllm_v<版本>_x86.fpk`。构建脚本会断言：包内 `portable/ftllm` 版本为 1.9.0、不含 Electron 桌面端、不含旧 `wheels/`、图标权限 644、入口认 `/app/ftllm` 前缀。
+产物在 `dist/ftllm_v<版本>_x86.fpk`。构建脚本会断言：包内 `portable/ftllm` 版本为 1.9.2、不含 Electron 桌面端、不含旧 `wheels/`、图标权限 644、入口认 `/app/ftllm` 前缀、两处本地补丁（静态资源缓存头、工作室绑定判空）在包内就位。
 
 ## 版本
 
+- **1.9.2.1**：修「覆盖升级后网页启动器/工作室打不开」。典型症状是打开工作室弹「启动器初始化失败: Cannot set properties of null (setting 'onchange')」，页面资源新旧混杂。根因：启动器的静态资源（页面 JS/HTML/插件）不发缓存头，浏览器按启发式规则长期缓存；覆盖升级后浏览器继续用磁盘上的旧版文件，与新版互相咬不上。现在启动器对 `/api/`、`/assets/`、`/ui_plugins/` 的响应统一带 `Cache-Control: no-store`，页面资源不再被浏览器长期缓存（浏览器仍带 ETag 协商，未变更返回 304，局域网开销可忽略）；工作室的元素绑定同时加判空防御，个别元素缺失只跳过该绑定，不再连累整个工作室初始化。上游程序版本不变（1.9.2）。
+- **1.9.2**：跟进上游 FastLLM-Launcher 1.9.2 一体包，运行时随包整体替换；打包机制不变。
+- **1.9.1**：跟进上游 FastLLM-Launcher 1.9.1 一体包；打包机制不变。
 - **1.9.0.2**：修「面板选 cuda、实际全程跑 CPU」。根因是包内缺 NCCL——CUDA 核心库 `libfastllm_tools.so` 依赖 `libnccl.so.2`，加载失败后 `ftllm/llm.py` 静默降级到 `libfastllm_tools-cpu.so`，界面上毫无提示。现在 NCCL 2.32.3 的 `libnccl.so.2` 与 `libnccl_device.bc` 随包落在运行时加载路径里，构建脚本断言其存在，静默降级也改为打印告警。实测 `Qwen3-0.6B` 生成 200 token ≈142 tok/s（CPU 模式光 warmup 就要十分钟以上）。
 - **1.9.0.1**：跟进上游 1.9.0「一体包」形态。运行时（CPython 3.11 + 全部依赖 + CUDA 运行库）随包发布，装机即用，首启从 1–2 分钟降到几秒，不再需要系统 Python 建虚拟环境。按 fnOS 场景砍掉 Electron 桌面端（GUI），只保留命令行 `ftllm` 与网页启动器；启动器仍是 `ftllm launch`，入口与令牌机制不变。版本号改为跟随上游（`1.9.0.1` = 上游 1.9.0 + 打包号 1）。
 - **0.1.8.2.2**：修手机端打不开——自研入口 `supervisor.py` 原先只认 `/` 与 `/index.html`，而手机端应用中心走网关前缀 `/app/ftllm/`，一律 404。现认 `/app/ftllm` 与 `/app/ftllm/*` 并同样 302 到 launcher。打包脚本新增「入口必须认 `/app/<appname>` 前缀」断言，源码与包内实物各校验一次。
